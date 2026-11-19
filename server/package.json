@@ -1,0 +1,22 @@
+{
+  "name": "windy-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "start": "node index.mjs",
+    "test": "node --test",
+    "provision": "node provision.mjs"
+  },
+  "dependencies": {
+    "cors": "2.8.6",
+    "express": "5.3.0",
+    "express-rate-limit": "8.7.5",
+    "helmet": "8.3.0",
+    "mongodb": "7.9.0",
+    "zod": "4.6.7"
+  }
+}
