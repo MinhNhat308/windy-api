@@ -4,7 +4,7 @@ import cors from 'cors';
 import { rateLimit } from 'express-rate-limit';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { allowHotfix, assignmentSchema, canDevelop, checkPassword, devWorkSchema, hashPassword, hashToken, loginSchema, phaseScheduleSchema, schemas, resources, publicMember, testWorkSchema, windyRoles } from './security.mjs';
+import { allowHotfix, assignmentSchema, canDevelop, checkPassword, devWorkSchema, hashPassword, hashToken, loginSchema, phaseScheduleSchema, schemas, resources, publicMember, testHandleRoles, testWorkSchema, windyRoles } from './security.mjs';
 
 export async function createApp(db, { origins = [], production = true } = {}) {
   const app = express();
@@ -70,7 +70,7 @@ export async function createApp(db, { origins = [], production = true } = {}) {
   });
   app.get('/calendar/people', async (req,res) => {
     if (!['admin','pm'].includes(req.user.role)) return fail(res,403,'Admin or PM required');
-    const rows = await db.collection('users').find({ active: true, role: { $in: req.user.role === 'admin' ? windyRoles : ['admin','dev','tester'] } }, { projection: { _id: 1, username: 1, role: 1, active: 1 } }).sort({ username: 1 }).toArray();
+    const rows = await db.collection('users').find({ active: true, role: { $in: windyRoles } }, { projection: { _id: 1, username: 1, role: 1, active: 1 } }).sort({ username: 1 }).toArray();
     res.json(rows.map(publicMember));
   });
   app.put('/calendar/people/:id/role', async (req,res) => {
@@ -93,7 +93,7 @@ export async function createApp(db, { origins = [], production = true } = {}) {
       const input = assignmentSchema.parse(req.body);
       const item = await items.findOne(filter);
       if (!item || (item[field]?.version ?? null) !== input.version) return fail(res,409,'Assignment changed; refresh first');
-      const account = input.user_id && await db.collection('users').findOne({ _id: input.user_id, active: true, role: { $in: lane === 'dev' ? ['admin','dev'] : ['tester'] } });
+      const account = input.user_id && await db.collection('users').findOne({ _id: input.user_id, active: true, role: { $in: lane === 'dev' ? ['admin','dev'] : testHandleRoles } });
       if (input.user_id && !account) return fail(res,400,'Account is not eligible for this assignment');
       if ((item[field]?.user_id ?? null) === input.user_id) return res.json({ ok: true });
       const result = await items.updateOne({ ...filter, [`${field}.version`]: input.version }, account
@@ -101,7 +101,7 @@ export async function createApp(db, { origins = [], production = true } = {}) {
         : { $unset: { [field]: '' } });
       if (!result.matchedCount) return fail(res,409,'Assignment changed; refresh first');
     } else {
-      if (lane === 'dev' ? !canDevelop(req.user) : req.user.role !== 'tester') return fail(res,403,'This role cannot update the result');
+      if (lane === 'dev' ? !canDevelop(req.user) : !testHandleRoles.includes(req.user.role)) return fail(res,403,'This role cannot update the result');
       const input = (lane === 'dev' ? devWorkSchema : testWorkSchema).parse(req.body);
       const result = await items.updateOne({ ...filter, [`${field}.user_id`]: req.user._id, [`${field}.version`]: input.version }, { $set: {
         [`${field}.status`]: input.status, [`${field}.note`]: input.note, [`${field}.version`]: randomUUID(), [`${field}.updated_at`]: new Date().toISOString(),

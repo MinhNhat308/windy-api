@@ -7,9 +7,10 @@ export const loginSchema = z.object({ username, password: z.string().min(1).max(
 const id = z.string().uuid();
 export const phaseScheduleSchema = z.object({ planned_date: z.iso.date().nullable() }).strict();
 export const windyRoles = ['admin','dev','pm','tester','collaborator'];
+export const testHandleRoles = windyRoles.filter(role => role !== 'dev');
 export const assignmentSchema = z.object({ user_id: id.nullable(), version: id.nullable() }).strict();
 export const devWorkSchema = z.object({ version: id, status: z.enum(['PENDING','IN_PROGRESS','DONE']), note: z.string().trim().max(4000) }).strict();
-export const testWorkSchema = z.object({ version: id, status: z.enum(['PENDING','PASSED','FAIL']), note: z.string().trim().max(4000) }).strict().refine(v => v.status !== 'FAIL' || v.note, { message: 'Fail requires a reason' });
+export const testWorkSchema = z.object({ version: id, status: z.enum(['PENDING','PASSED','FAIL']), note: z.string().trim().max(4000).default('') }).strict().refine(v => v.status !== 'FAIL' || v.note, { message: 'Fail requires a reason' });
 export const schemas = {
   windy_batches: z.object({ name: z.string().trim().min(1).max(100), planned_date: z.iso.date().nullable(), notes: z.string().max(10000).default('') }).strict(),
   windy_phases: z.object({ batch_id: id, name: z.string().trim().min(1).max(150), position: z.number().int().nonnegative() }).strict(),

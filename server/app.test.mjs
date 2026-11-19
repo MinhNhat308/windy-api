@@ -97,15 +97,29 @@ test('HTTP authentication/role boundary and logout (fake database, not Atlas)', 
     assert.equal((await call('/calendar/people',null,dev)).status,403);
     const directory = await (await call('/calendar/people',null,pm)).json();
     assert.ok(directory.some(p => p.user_id === devId));
-    assert.ok(directory.every(p => ['admin','tester','dev'].includes(p.role) && !('password_hash' in p)));
+    assert.deepEqual(new Set(directory.map(p => p.role)),new Set(['admin','tester','dev','pm','collaborator']));
+    assert.ok(directory.every(p => !('password_hash' in p)));
     assert.equal((await put(`${itemPath}/dev/assign`,{user_id:devId,version:null},dev)).status,403);
     assert.equal((await put(`${itemPath}/dev/assign`,{user_id:testerId,version:null},pm)).status,400);
     assert.equal((await put(`${itemPath}/dev/assign`,{user_id:devId,version:null},pm)).status,200);
+    assert.equal((await put(`${itemPath}/test/assign`,{user_id:devId,version:null},pm)).status,400);
     assert.equal((await put(`${itemPath}/test/assign`,{user_id:testerId,version:null},admin.token)).status,200);
     const version = item.test_handle.version;
     assert.equal((await put(`${itemPath}/test/result`,{version,status:'FAIL',note:'  '},tester)).status,400);
     assert.equal((await put(`${itemPath}/test/result`,{version,status:'PASSED',note:''},tester)).status,200);
     assert.equal((await put(`${itemPath}/test/result`,{version,status:'FAIL',note:'Stale'},tester)).status,409);
+    for (const [id, owner] of [[pmId,pm],['collab',token],['admin',admin.token]]) {
+      // The original fixture uses short IDs for login; role eligibility is tested with UUID fixture accounts below.
+      const user = users.find(u => u._id === id);
+      const target = id === pmId ? id : id === 'collab' ? '44b5e8ad-46e5-4707-86da-cc98c1c50905' : '55b5e8ad-46e5-4707-86da-cc98c1c50905';
+      if (target !== id) users.push({...user,_id:target});
+      const assignee = target === id ? owner : memberToken(target);
+      assert.equal((await put(`${itemPath}/test/assign`,{user_id:target,version:item.test_handle.version},pm)).status,200);
+      const current = item.test_handle.version;
+      assert.equal((await put(`${itemPath}/test/result`,{version:current,status:'PASSED'},tester)).status,409);
+      assert.equal((await put(`${itemPath}/test/result`,{version:current,status:'PENDING'},assignee)).status,200);
+      assert.equal(item.test_handle.note,'');
+    }
     assert.equal((await put(`${itemPath}/dev/result`,{version:item.dev_handle.version,status:'DONE',note:''},dev)).status,200);
     assert.equal((await put(`${itemPath}/dev/assign`,{user_id:null,version:item.dev_handle.version},pm)).status,200);
     assert.equal(item.dev_handle,undefined);
