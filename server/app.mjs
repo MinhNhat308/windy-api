@@ -4,7 +4,7 @@ import cors from 'cors';
 import { rateLimit } from 'express-rate-limit';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { allowHotfix, checkPassword, hashPassword, hashToken, loginSchema, schemas, resources, publicMember } from './security.mjs';
+import { allowHotfix, checkPassword, hashPassword, hashToken, loginSchema, phaseScheduleSchema, schemas, resources, publicMember } from './security.mjs';
 
 export async function createApp(db, { origins = [], production = true } = {}) {
   const app = express();
@@ -80,6 +80,14 @@ export async function createApp(db, { origins = [], production = true } = {}) {
       await db.collection(resource).bulkWrite(values.map(value => ({ updateOne: { filter: { phase_id: value.phase_id, jira_key: value.jira_key }, update: { $setOnInsert: { ...value, id: randomUUID(), submitted_by: req.user._id, created_at: now } }, upsert: true } })));
     } else await db.collection(resource).insertOne({ ...values[0], id: randomUUID(), created_by: req.user._id, created_at: now });
     res.status(201).json({ ok: true });
+  });
+  app.put('/phases/:id/schedule', async (req,res) => {
+    if (req.user.role !== 'admin') return fail(res,403,'Admin required');
+    const id = z.string().uuid().parse(req.params.id);
+    const { planned_date } = phaseScheduleSchema.parse(req.body);
+    const result = await db.collection('windy_phases').updateOne({ id }, { $set: { planned_date } });
+    if (!result.matchedCount) return fail(res,404,'Phase not found');
+    res.json({ planned_date });
   });
   app.put('/hotfixes/:id', async (req,res) => {
     const input = schemas.windy_hotfixes.parse(req.body);

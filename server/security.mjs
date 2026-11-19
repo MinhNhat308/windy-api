@@ -5,6 +5,7 @@ const scrypt = promisify(callback);
 export const username = z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,32}$/);
 export const loginSchema = z.object({ username, password: z.string().min(1).max(256) }).strict();
 const id = z.string().uuid();
+export const phaseScheduleSchema = z.object({ planned_date: z.iso.date().nullable() }).strict();
 export const schemas = {
   windy_batches: z.object({ name: z.string().trim().min(1).max(100), planned_date: z.iso.date().nullable(), notes: z.string().max(10000).default('') }).strict(),
   windy_phases: z.object({ batch_id: id, name: z.string().trim().min(1).max(150), position: z.number().int().nonnegative() }).strict(),
