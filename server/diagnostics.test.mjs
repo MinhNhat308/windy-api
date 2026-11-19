@@ -15,4 +15,6 @@ test('startup diagnostics classify failures without leaking URI or secrets', () 
   assert.match(startupDiagnostic({message:'Configure MONGODB_URI securely on the server'}),/CONFIG_MONGODB_URI/);
   assert.match(startupDiagnostic({code:18}),/DB_AUTH/);
   assert.match(startupDiagnostic({name:'MongoServerSelectionError'}),/DB_NETWORK/);
+  assert.match(startupDiagnostic({name:'MongoServerSelectionError'}, {local:true}),/current public IP/);
+  assert.match(startupDiagnostic({message:'Configure MONGODB_URI securely on the server'}, {local:true}),/hidden prompt/);
 });

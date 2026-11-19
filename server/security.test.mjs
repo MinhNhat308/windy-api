@@ -21,5 +21,5 @@ test('strict schemas reject mass assignment and query injection', () => {
 });
 test('tokens are hashed and members expose no secrets', () => {
   assert.equal(hashToken('a').length,64);
-  assert.deepEqual(publicMember({_id:'u', username:'tester',role:'collaborator',active:true,password_hash:'secret'}),{user_id:'u',username:'tester',role:'collaborator',active:true});
+  assert.deepEqual(publicMember({_id:'u', username:'tester',role:'collaborator',active:true,password_hash:'secret',credential_version:'private'}),{user_id:'u',username:'tester',role:'collaborator',active:true,must_change_password:false});
 });

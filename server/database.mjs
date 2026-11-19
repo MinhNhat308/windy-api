@@ -1,7 +1,7 @@
 import { MongoClient } from 'mongodb';
 export async function connect() {
   const uri = process.env.MONGODB_URI;
-  if (!uri || /<db_password>/.test(uri)) throw new Error('Configure MONGODB_URI securely on the server');
+  if (!uri || /<db_password>|(?:<password>|%3C(?:db_)?password%3E|MAT_KHAU_DA_ENCODE)(?=@)/i.test(uri)) throw new Error('Configure MONGODB_URI securely on the server');
   // Never disable TLS certificate validation or print the credential-bearing URI.
   const client = new MongoClient(uri, { tls: true, serverSelectionTimeoutMS: 10000, maxPoolSize: 10 });
   await client.connect();

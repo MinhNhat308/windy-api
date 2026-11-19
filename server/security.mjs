@@ -6,6 +6,10 @@ export const username = z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,32}$
 export const loginSchema = z.object({ username, password: z.string().min(1).max(256) }).strict();
 const id = z.string().uuid();
 export const phaseScheduleSchema = z.object({ planned_date: z.iso.date().nullable() }).strict();
+export const windyRoles = ['admin','dev','pm','tester','collaborator'];
+export const assignmentSchema = z.object({ user_id: id.nullable(), version: id.nullable() }).strict();
+export const devWorkSchema = z.object({ version: id, status: z.enum(['PENDING','IN_PROGRESS','DONE']), note: z.string().trim().max(4000) }).strict();
+export const testWorkSchema = z.object({ version: id, status: z.enum(['PENDING','PASSED','FAIL']), note: z.string().trim().max(4000) }).strict().refine(v => v.status !== 'FAIL' || v.note, { message: 'Fail requires a reason' });
 export const schemas = {
   windy_batches: z.object({ name: z.string().trim().min(1).max(100), planned_date: z.iso.date().nullable(), notes: z.string().max(10000).default('') }).strict(),
   windy_phases: z.object({ batch_id: id, name: z.string().trim().min(1).max(150), position: z.number().int().nonnegative() }).strict(),
@@ -25,7 +29,7 @@ export async function checkPassword(password, stored) {
   const expected = Buffer.from(hash, 'hex');
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
-export function publicMember(user) { return { user_id: user._id, username: user.username, role: user.role, active: user.active }; }
+export function publicMember(user) { return { user_id: user._id, username: user.username, role: user.role, active: user.active, must_change_password: user.must_change_password === true }; }
 export function canDevelop(user) { return user.role === 'admin' || user.role === 'dev'; }
 export function allowHotfix(user, input, old) {
   if (canDevelop(user)) return true;

@@ -4,7 +4,7 @@ import cors from 'cors';
 import { rateLimit } from 'express-rate-limit';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { allowHotfix, canDevelop, checkPassword, hashPassword, hashToken, loginSchema, phaseScheduleSchema, schemas, resources, publicMember } from './security.mjs';
+import { allowHotfix, assignmentSchema, canDevelop, checkPassword, devWorkSchema, hashPassword, hashToken, loginSchema, phaseScheduleSchema, schemas, resources, publicMember, testWorkSchema, windyRoles } from './security.mjs';
 
 export async function createApp(db, { origins = [], production = true } = {}) {
   const app = express();
@@ -39,7 +39,7 @@ export async function createApp(db, { origins = [], production = true } = {}) {
     if (!valid || !user?.active) return fail(res,401,'Invalid login');
     const token = randomBytes(32).toString('base64url');
     const expires = new Date(Date.now() + 8 * 3600000);
-    await db.collection('sessions').insertOne({ _id: hashToken(token), user_id: user._id, expires_at: expires });
+    await db.collection('sessions').insertOne({ _id: hashToken(token), user_id: user._id, credential_version: user.credential_version ?? null, expires_at: expires });
     res.json({ token, member: publicMember(user), expires_at: expires.toISOString() });
   });
   app.use(async (req,res,next) => {
@@ -47,7 +47,7 @@ export async function createApp(db, { origins = [], production = true } = {}) {
     if (!token) return fail(res,401,'Login required');
     const session = await db.collection('sessions').findOne({ _id: hashToken(token), expires_at: { $gt: new Date() } });
     const user = session && await db.collection('users').findOne({ _id: session.user_id, active: true });
-    if (!user || !['admin','dev','collaborator'].includes(user.role)) return fail(res,401,'Session expired or account disabled');
+    if (!user || !windyRoles.includes(user.role) || (user.credential_version ?? null) !== (session.credential_version ?? null)) return fail(res,401,'Session expired or account disabled');
     req.user = user; req.sessionId = session._id; next();
   });
   app.get('/auth/me', (req,res) => res.json(publicMember(req.user)));
@@ -55,9 +55,59 @@ export async function createApp(db, { origins = [], production = true } = {}) {
   app.post('/auth/password', async (req,res) => {
     const result = z.object({ current: z.string().min(1).max(256), password: z.string().min(12).max(256) }).strict().safeParse(req.body);
     if (!result.success) return fail(res,400,'New password must be at least 12 characters');
+    if (result.data.current === result.data.password) return fail(res,400,'New password must differ from current password');
     if (!await checkPassword(result.data.current,req.user.password_hash)) return fail(res,403,'Current password incorrect');
-    await db.collection('users').updateOne({ _id: req.user._id, password_hash: req.user.password_hash }, { $set: { password_hash: await hashPassword(result.data.password) } });
-    await db.collection('sessions').deleteMany({ user_id: req.user._id });
+    const update = await db.collection('users').updateOne({ _id: req.user._id, active: true, password_hash: req.user.password_hash }, { $set: {
+      password_hash: await hashPassword(result.data.password), credential_version: randomUUID(), must_change_password: false,
+    } });
+    if (!update.matchedCount) return fail(res,409,'Password already changed; sign in again');
+    // All prior sessions (including concurrent logins using the old hash) are now invalid.
+    res.json({ ok: true });
+  });
+  app.use((req,res,next) => {
+    if (req.user.must_change_password === true) return fail(res,403,'Change your temporary password first');
+    next();
+  });
+  app.get('/calendar/people', async (req,res) => {
+    if (!['admin','pm'].includes(req.user.role)) return fail(res,403,'Admin or PM required');
+    const rows = await db.collection('users').find({ active: true, role: { $in: req.user.role === 'admin' ? windyRoles : ['admin','dev','tester'] } }, { projection: { _id: 1, username: 1, role: 1, active: 1 } }).sort({ username: 1 }).toArray();
+    res.json(rows.map(publicMember));
+  });
+  app.put('/calendar/people/:id/role', async (req,res) => {
+    if (req.user.role !== 'admin') return fail(res,403,'Admin required');
+    const id = z.string().uuid().parse(req.params.id);
+    const { role } = z.object({ role: z.enum(['dev','pm','tester','collaborator']) }).strict().parse(req.body);
+    const result = await db.collection('users').updateOne({ _id: id, active: true, role: { $ne: 'admin' } }, { $set: { role } });
+    if (!result.matchedCount) return fail(res,404,'Active non-admin account not found');
+    res.json({ ok: true });
+  });
+  app.put('/calendar/items/:id/:lane/:action', async (req,res) => {
+    const id = z.string().uuid().parse(req.params.id);
+    const lane = z.enum(['dev','test']).parse(req.params.lane);
+    const action = z.enum(['assign','result']).parse(req.params.action);
+    const field = `${lane}_handle`;
+    const items = db.collection('windy_items');
+    const filter = { id, removed_at: { $exists: false } };
+    if (action === 'assign') {
+      if (!['admin','pm'].includes(req.user.role)) return fail(res,403,'Admin or PM required');
+      const input = assignmentSchema.parse(req.body);
+      const item = await items.findOne(filter);
+      if (!item || (item[field]?.version ?? null) !== input.version) return fail(res,409,'Assignment changed; refresh first');
+      const account = input.user_id && await db.collection('users').findOne({ _id: input.user_id, active: true, role: { $in: lane === 'dev' ? ['admin','dev'] : ['tester'] } });
+      if (input.user_id && !account) return fail(res,400,'Account is not eligible for this assignment');
+      if ((item[field]?.user_id ?? null) === input.user_id) return res.json({ ok: true });
+      const result = await items.updateOne({ ...filter, [`${field}.version`]: input.version }, account
+        ? { $set: { [field]: { user_id: account._id, username: account.username, status: 'PENDING', note: '', version: randomUUID(), updated_at: new Date().toISOString() } } }
+        : { $unset: { [field]: '' } });
+      if (!result.matchedCount) return fail(res,409,'Assignment changed; refresh first');
+    } else {
+      if (lane === 'dev' ? !canDevelop(req.user) : req.user.role !== 'tester') return fail(res,403,'This role cannot update the result');
+      const input = (lane === 'dev' ? devWorkSchema : testWorkSchema).parse(req.body);
+      const result = await items.updateOne({ ...filter, [`${field}.user_id`]: req.user._id, [`${field}.version`]: input.version }, { $set: {
+        [`${field}.status`]: input.status, [`${field}.note`]: input.note, [`${field}.version`]: randomUUID(), [`${field}.updated_at`]: new Date().toISOString(),
+      } });
+      if (!result.matchedCount) return fail(res,409,'Assignment or result changed; refresh first');
+    }
     res.json({ ok: true });
   });
   app.get('/data/:resource', async (req,res) => {
@@ -71,6 +121,7 @@ export async function createApp(db, { origins = [], production = true } = {}) {
   app.post('/data/:resource', async (req,res) => {
     const resource = req.params.resource;
     if (!['windy_batches','windy_phases','windy_items'].includes(resource)) return fail(res,404,'Not found');
+    if (req.user.role === 'dev') return fail(res,403,'Build Calendar is read-only for Dev');
     if (resource !== 'windy_items' && req.user.role !== 'admin') return fail(res,403,'Admin required');
     const values = z.array(schemas[resource]).min(1).max(resource === 'windy_items' ? 200 : 1).parse(Array.isArray(req.body) ? req.body : [req.body]);
     const parentIds = [...new Set(values.map(v => resource === 'windy_items' ? v.phase_id : v.batch_id).filter(Boolean))];
@@ -83,8 +134,9 @@ export async function createApp(db, { origins = [], production = true } = {}) {
     res.status(201).json({ ok: true });
   });
   app.delete('/calendar/items/:id', async (req,res) => {
+    if (req.user.role === 'dev') return fail(res,403,'Build Calendar is read-only for Dev');
     const id = z.string().uuid().parse(req.params.id);
-    const result = await db.collection('windy_items').updateOne({ id, removed_at: { $exists: false }, ...(canDevelop(req.user) ? {} : { submitted_by: req.user._id }) }, { $set: { removed_at: new Date().toISOString(), removed_by: req.user._id } });
+    const result = await db.collection('windy_items').updateOne({ id, removed_at: { $exists: false }, ...(req.user.role === 'admin' ? {} : { submitted_by: req.user._id }) }, { $set: { removed_at: new Date().toISOString(), removed_by: req.user._id } });
     if (!result.matchedCount) return fail(res,404,'Ticket not found or cannot be removed by this account');
     res.json({ ok: true });
   });
@@ -93,10 +145,16 @@ export async function createApp(db, { origins = [], production = true } = {}) {
     const rows = z.array(z.object({ jira_key: z.string().max(180).regex(/^[A-Z][A-Z0-9_]*-[0-9]+$/), summary: z.string().trim().min(1).max(500), jira_status: z.string().trim().min(1).max(200) }).strict()).min(1).max(20).parse(req.body);
     const keys = [...new Set(rows.map(r => r.jira_key))];
     if (keys.length !== rows.length) return fail(res,400,'Duplicate Jira keys');
-    const active = await db.collection('windy_items').distinct('jira_key', { jira_key: { $in: keys }, removed_at: { $exists: false } });
-    if (active.length !== keys.length) return fail(res,409,'A Jira ticket is no longer in Build Calendar');
+    const active = await db.collection('windy_items').distinct('jira_key', { jira_key: { $in: keys }, removed_at: { $exists: false }, ...(req.user.role === 'dev' ? { 'dev_handle.user_id': req.user._id } : {}) });
+    if (active.length !== keys.length) return fail(res,409,'A Jira ticket is no longer in Build Calendar or assigned to this account');
     const updated_at = new Date().toISOString();
     await db.collection('windy_jira_snapshots').bulkWrite(rows.map(row => ({updateOne:{filter:{_id:row.jira_key}, update:{$set:{...row,id:row.jira_key,updated_at}},upsert:true}})));
+    res.json({ ok: true });
+  });
+  app.get('/calendar/jira/:key/resolve-access', async (req,res) => {
+    if (!canDevelop(req.user)) return fail(res,403,'Developer required');
+    const jira_key = z.string().max(180).regex(/^[A-Z][A-Z0-9_]*-[0-9]+$/).parse(req.params.key);
+    if (req.user.role === 'dev' && !await db.collection('windy_items').findOne({ jira_key, 'dev_handle.user_id': req.user._id, removed_at: { $exists: false } }, { projection: { _id: 1 } })) return fail(res,403,'Jira issue is not assigned to this account');
     res.json({ ok: true });
   });
   app.put('/phases/:id/schedule', async (req,res) => {
@@ -108,6 +166,7 @@ export async function createApp(db, { origins = [], production = true } = {}) {
     res.json({ planned_date });
   });
   app.put('/hotfixes/:id', async (req,res) => {
+    if (req.user.role === 'dev') return fail(res,403,'Shared HOTFIX is read-only for Dev');
     const input = schemas.windy_hotfixes.parse(req.body);
     if (input.id !== req.params.id) return fail(res,400,'ID mismatch');
     const collection = db.collection('windy_hotfixes');
