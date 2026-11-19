@@ -4,7 +4,7 @@ import cors from 'cors';
 import { rateLimit } from 'express-rate-limit';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { allowHotfix, checkPassword, hashPassword, hashToken, loginSchema, phaseScheduleSchema, schemas, resources, publicMember } from './security.mjs';
+import { allowHotfix, canDevelop, checkPassword, hashPassword, hashToken, loginSchema, phaseScheduleSchema, schemas, resources, publicMember } from './security.mjs';
 
 export async function createApp(db, { origins = [], production = true } = {}) {
   const app = express();
@@ -12,7 +12,7 @@ export async function createApp(db, { origins = [], production = true } = {}) {
   // Render terminates HTTPS and adds one reverse proxy hop.
   app.set('trust proxy', 1);
   app.use(helmet());
-  app.use(cors({ origin(origin, done) { done(null, !origin || origins.includes(origin)); }, allowedHeaders: ['Content-Type','Authorization'], methods: ['GET','POST','PUT','OPTIONS'] }));
+  app.use(cors({ origin(origin, done) { done(null, !origin || origins.includes(origin)); }, allowedHeaders: ['Content-Type','Authorization'], methods: ['GET','POST','PUT','DELETE','OPTIONS'] }));
   app.use(express.json({ limit: '128kb' }));
   app.use((_req,res,next) => { res.set('Cache-Control','no-store'); next(); });
   app.get('/health', async (_req,res) => {
@@ -64,7 +64,8 @@ export async function createApp(db, { origins = [], production = true } = {}) {
     if (!resources.has(req.params.resource)) return fail(res,404,'Not found');
     const offset = Number(req.query.offset ?? 0);
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1000000) return fail(res,400,'Invalid offset');
-    const rows = await db.collection(req.params.resource).find({}, { projection: { _id: 0 } }).sort({ id: 1 }).skip(offset).limit(500).toArray();
+    const filter = req.params.resource === 'windy_items' ? { removed_at: { $exists: false } } : {};
+    const rows = await db.collection(req.params.resource).find(filter, { projection: { _id: 0 } }).sort({ id: 1 }).skip(offset).limit(500).toArray();
     res.json(rows);
   });
   app.post('/data/:resource', async (req,res) => {
@@ -77,9 +78,26 @@ export async function createApp(db, { origins = [], production = true } = {}) {
     const now = new Date().toISOString();
     if (resource === 'windy_items') {
       // Idempotent per phase/key: retry cannot duplicate or overwrite original submitter.
-      await db.collection(resource).bulkWrite(values.map(value => ({ updateOne: { filter: { phase_id: value.phase_id, jira_key: value.jira_key }, update: { $setOnInsert: { ...value, id: randomUUID(), submitted_by: req.user._id, created_at: now } }, upsert: true } })));
+      await db.collection(resource).bulkWrite(values.map(value => ({ updateOne: { filter: { phase_id: value.phase_id, jira_key: value.jira_key }, update: { $setOnInsert: { ...value, id: randomUUID(), submitted_by: req.user._id, created_at: now }, $unset: { removed_at: '', removed_by: '' } }, upsert: true } })));
     } else await db.collection(resource).insertOne({ ...values[0], id: randomUUID(), created_by: req.user._id, created_at: now });
     res.status(201).json({ ok: true });
+  });
+  app.delete('/calendar/items/:id', async (req,res) => {
+    const id = z.string().uuid().parse(req.params.id);
+    const result = await db.collection('windy_items').updateOne({ id, removed_at: { $exists: false }, ...(canDevelop(req.user) ? {} : { submitted_by: req.user._id }) }, { $set: { removed_at: new Date().toISOString(), removed_by: req.user._id } });
+    if (!result.matchedCount) return fail(res,404,'Ticket not found or cannot be removed by this account');
+    res.json({ ok: true });
+  });
+  app.put('/calendar/jira-snapshots', async (req,res) => {
+    if (!canDevelop(req.user)) return fail(res,403,'Developer required');
+    const rows = z.array(z.object({ jira_key: z.string().max(180).regex(/^[A-Z][A-Z0-9_]*-[0-9]+$/), summary: z.string().trim().min(1).max(500), jira_status: z.string().trim().min(1).max(200) }).strict()).min(1).max(20).parse(req.body);
+    const keys = [...new Set(rows.map(r => r.jira_key))];
+    if (keys.length !== rows.length) return fail(res,400,'Duplicate Jira keys');
+    const active = await db.collection('windy_items').distinct('jira_key', { jira_key: { $in: keys }, removed_at: { $exists: false } });
+    if (active.length !== keys.length) return fail(res,409,'A Jira ticket is no longer in Build Calendar');
+    const updated_at = new Date().toISOString();
+    await db.collection('windy_jira_snapshots').bulkWrite(rows.map(row => ({updateOne:{filter:{_id:row.jira_key}, update:{$set:{...row,id:row.jira_key,updated_at}},upsert:true}})));
+    res.json({ ok: true });
   });
   app.put('/phases/:id/schedule', async (req,res) => {
     if (req.user.role !== 'admin') return fail(res,403,'Admin required');

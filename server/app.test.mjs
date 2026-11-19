@@ -8,6 +8,9 @@ test('HTTP authentication/role boundary and logout (fake database, not Atlas)', 
   const sessions = new Map();
   const phaseId = '9ab5e8ad-46e5-4707-86da-cc98c1c50905';
   const phase = { id: phaseId, position: 0 };
+  const itemId = 'dab5e8ad-46e5-4707-86da-cc98c1c50905';
+  const item = { id:itemId, phase_id:phaseId, jira_key:'TEST-1', submitted_by:'collab' };
+  let snapshot;
   const db = {
     command: async () => ({ok:1}),
     collection(name) { return {
@@ -17,7 +20,13 @@ test('HTTP authentication/role boundary and logout (fake database, not Atlas)', 
       },
       findOneAndUpdate: async () => ({count:1}),
       insertOne: async row => { if (name === 'sessions') sessions.set(row._id,row); },
-      updateOne: async ({id}, { $set }) => {
+      distinct: async (field, filter) => name === 'windy_items' && field === 'jira_key' && !item.removed_at && filter.jira_key.$in.includes(item.jira_key) ? [item.jira_key] : [],
+      bulkWrite: async operations => { assert.equal(name,'windy_jira_snapshots'); snapshot = operations[0].updateOne.update.$set; },
+      updateOne: async ({id, submitted_by}, { $set }) => {
+        if (name === 'windy_items') {
+          if (id !== item.id || item.removed_at || (submitted_by !== undefined && submitted_by !== item.submitted_by)) return {matchedCount:0};
+          Object.assign(item,$set); return {matchedCount:1};
+        }
         assert.equal(name, 'windy_phases');
         if (id !== phaseId) return {matchedCount:0};
         Object.assign(phase,$set); return {matchedCount:1};
@@ -46,6 +55,19 @@ test('HTTP authentication/role boundary and logout (fake database, not Atlas)', 
     assert.deepEqual(phase,{id:phaseId,position:0,planned_date:'2026-11-19'});
     assert.equal((await call(schedule,{planned_date:null},admin.token,'PUT')).status,200);
     assert.equal(phase.planned_date,null);
+    const rows = [{jira_key:'TEST-1',summary:'Test title',jira_status:'Open'}];
+    assert.equal((await call('/calendar/jira-snapshots',rows,token,'PUT')).status,403);
+    assert.equal((await call('/calendar/jira-snapshots',[{...rows[0],description:'private'}],admin.token,'PUT')).status,400);
+    assert.equal((await call('/calendar/jira-snapshots',rows,admin.token,'PUT')).status,200);
+    assert.equal(snapshot.summary,'Test title');
+    const itemPath = `/calendar/items/${itemId}`;
+    item.submitted_by = 'other';
+    assert.equal((await call(itemPath,null,token,'DELETE')).status,404);
+    item.submitted_by = 'collab';
+    assert.equal((await call(itemPath,null,token,'DELETE')).status,200);
+    assert.equal(item.removed_by,'collab');
+    assert.equal(item.jira_key,'TEST-1');
+    assert.equal((await call('/calendar/jira-snapshots',rows,admin.token,'PUT')).status,409);
     assert.equal((await call('/data/users',null,token)).status,404);
     assert.equal((await call('/auth/me',null,'forged')).status,401);
     users[0].active=false; assert.equal((await call('/auth/me',null,token)).status,401); users[0].active=true;
