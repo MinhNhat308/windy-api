@@ -16,7 +16,7 @@ export const schemas = {
   windy_batches: z.object({ name: z.string().trim().min(1).max(100), planned_date: z.iso.date().nullable(), notes: z.string().max(10000).default('') }).strict(),
   windy_phases: z.object({ batch_id: id, name: z.string().trim().min(1).max(150), position: z.number().int().nonnegative() }).strict(),
   windy_items: z.object({ phase_id: id, jira_key: z.string().regex(/^[A-Z][A-Z0-9_]*-[0-9]+$/) }).strict(),
-  windy_hotfixes: z.object({ id, title: z.string().trim().min(1).max(500), notes: z.string().max(20000), build: z.string().max(100), status: z.enum(['OPEN','FIXING','FIXED']), revisions: z.array(z.number().int().positive().safe()).max(500), updated_at: z.string().optional() }).strict(),
+  windy_hotfixes: z.object({ id, title: z.string().trim().min(1).max(500), notes: z.string().max(20000), build: z.string().max(100), batch_id: id.optional(), phase_id: id.optional(), jira_key: z.string().max(180).regex(/^[A-Z][A-Z0-9_]*-[0-9]+$/).nullable().optional(), status: z.enum(['OPEN','FIXING','FIXED']), revisions: z.array(z.number().int().positive().safe()).max(500), updated_at: z.string().optional() }).strict().refine(row => Boolean(row.batch_id) === Boolean(row.phase_id) && (!row.jira_key || !!row.phase_id), 'Build and phase are required together'),
 };
 export const resources = new Set([...Object.keys(schemas), 'windy_jira_snapshots', 'windy_progress']);
 export function hashToken(value) { return createHash('sha256').update(value).digest('hex'); }

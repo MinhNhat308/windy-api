@@ -16,7 +16,11 @@ export async function createApp(db, { origins = [], production = true } = {}) {
   app.use(express.json({ limit: '128kb' }));
   app.use((_req,res,next) => { res.set('Cache-Control','no-store'); next(); });
   app.get('/health', async (_req,res) => {
-    try { await db.command({ ping: 1 }); res.json({ ok: true }); } catch { res.status(503).json({ error: 'Database unavailable' }); }
+    try {
+      await db.command({ ping: 1 });
+      const commit = process.env.RENDER_GIT_COMMIT;
+      res.json({ ok: true, hotfix_scope: true, ...(/^[a-f0-9]{40}$/i.test(commit ?? '') ? { commit } : {}) });
+    } catch { res.status(503).json({ error: 'Database unavailable' }); }
   });
   app.use(rateLimit({ windowMs: 60000, limit: 180, standardHeaders: 'draft-8', legacyHeaders: false }));
   const dummyHash = await hashPassword(randomBytes(32).toString('hex'));
@@ -174,11 +178,21 @@ export async function createApp(db, { origins = [], production = true } = {}) {
   });
   app.put('/hotfixes/:id', async (req,res) => {
     if (req.user.role === 'dev') return fail(res,403,'Shared HOTFIX is read-only for Dev');
-    const input = schemas.windy_hotfixes.parse(req.body);
+    const parsed = schemas.windy_hotfixes.safeParse(req.body);
+    if (!parsed.success) return fail(res,400,'HOTFIX không hợp lệ. Kiểm tra tiêu đề, ghi chú, đợt build, phase, mã Jira (nếu có) và danh sách revision.');
+    const input = parsed.data;
     if (input.id !== req.params.id) return fail(res,400,'ID mismatch');
     const collection = db.collection('windy_hotfixes');
     const old = await collection.findOne({ _id: input.id });
     if (!allowHotfix(req.user,input,old)) return fail(res,403,'Only developers may change fix status/commits; collaborators edit only their own notes');
+    if (!input.phase_id && (!old || old.phase_id)) return fail(res,400,'Select an existing build and phase for this HOTFIX');
+    if (input.phase_id) {
+      const [batch, phase] = await Promise.all([
+        db.collection('windy_batches').findOne({ id: input.batch_id }),
+        db.collection('windy_phases').findOne({ id: input.phase_id, batch_id: input.batch_id }),
+      ]);
+      if (!batch || !phase || batch.name !== input.build) return fail(res,409,'The build label or phase no longer matches; refresh and select again');
+    }
     const { updated_at: expected, ...fields } = input;
     const now = new Date().toISOString();
     if (old) {

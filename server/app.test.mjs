@@ -8,7 +8,8 @@ test('HTTP authentication/role boundary and logout (fake database, not Atlas)', 
     {_id:'admin',username:'admin',role:'admin',active:true,password_hash:await hashPassword('admin-test-password')}];
   const sessions = new Map();
   const phaseId = '9ab5e8ad-46e5-4707-86da-cc98c1c50905';
-  const phase = { id: phaseId, position: 0 };
+  const batchId = '8ab5e8ad-46e5-4707-86da-cc98c1c50905';
+  const phase = { id: phaseId, batch_id: batchId, position: 0 };
   const itemId = 'dab5e8ad-46e5-4707-86da-cc98c1c50905';
   const item = { id:itemId, phase_id:phaseId, jira_key:'TEST-1', submitted_by:'collab' };
   const pmId = '11b5e8ad-46e5-4707-86da-cc98c1c50905';
@@ -29,6 +30,7 @@ test('HTTP authentication/role boundary and logout (fake database, not Atlas)', 
     return expected === null ? value == null : value === expected;
   });
   let snapshot;
+  let hotfix;
   const db = {
     command: async () => ({ok:1}),
     collection(name) { return {
@@ -36,11 +38,14 @@ test('HTTP authentication/role boundary and logout (fake database, not Atlas)', 
          if (name === 'users') return users.find(u => matches(u,query));
          if (name === 'sessions') { const s = sessions.get(query._id); return s && s.expires_at > query.expires_at.$gt ? s : null; }
           if (name === 'windy_items' && matches(item,query)) return item;
-          if (name === 'windy_jira_snapshots' && snapshot?.jira_key === query._id) return snapshot;
+           if (name === 'windy_jira_snapshots' && snapshot?.jira_key === query._id) return snapshot;
+           if (name === 'windy_batches' && query.id === batchId) return { id: batchId, name: 'v154' };
+           if (name === 'windy_phases' && matches(phase,query)) return phase;
+           if (name === 'windy_hotfixes' && hotfix && matches(hotfix,query)) return hotfix;
        },
        find: query => ({sort: () => ({toArray: async () => users.filter(u => matches(u,query))})}),
       findOneAndUpdate: async () => ({count:1}),
-      insertOne: async row => { if (name === 'sessions') sessions.set(row._id,row); },
+       insertOne: async row => { if (name === 'sessions') sessions.set(row._id,row); if (name === 'windy_hotfixes') hotfix = row; },
       distinct: async (field, filter) => name === 'windy_items' && field === 'jira_key' && !item.removed_at && filter.jira_key.$in.includes(item.jira_key) ? [item.jira_key] : [],
       bulkWrite: async operations => { assert.equal(name,'windy_jira_snapshots'); snapshot = operations[0].updateOne.update.$set; },
         updateOne: async (filter, { $set, $unset }) => {
@@ -59,7 +64,11 @@ test('HTTP authentication/role boundary and logout (fake database, not Atlas)', 
            for (const key of Object.keys($unset ?? {})) delete item[key];
            return {matchedCount:1};
         }
-        assert.equal(name, 'windy_phases');
+         if (name === 'windy_hotfixes') {
+           if (!hotfix || !matches(hotfix,filter)) return { matchedCount: 0 };
+           Object.assign(hotfix,$set); return { matchedCount: 1 };
+         }
+         assert.equal(name, 'windy_phases');
         if (id !== phaseId) return {matchedCount:0};
         Object.assign(phase,$set); return {matchedCount:1};
       },
@@ -71,7 +80,9 @@ test('HTTP authentication/role boundary and logout (fake database, not Atlas)', 
   const base = `http://127.0.0.1:${server.address().port}`;
   const call = (path,body,token,method=body ? 'POST' : 'GET') => fetch(base+path,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});
   try {
-    assert.equal((await call('/health')).status,200);
+    const health = await call('/health');
+    assert.equal(health.status,200);
+    assert.equal((await health.json()).hotfix_scope,true);
     assert.equal((await call('/auth/me')).status,401);
     assert.equal((await call('/auth/login',{username:'tester',password:'wrong'})).status,401);
     const login = await call('/auth/login',{username:'tester',password:'test-password-only'}); assert.equal(login.status,200);
@@ -79,13 +90,28 @@ test('HTTP authentication/role boundary and logout (fake database, not Atlas)', 
     assert.equal((await call('/auth/me',null,token)).status,200);
     assert.equal((await (await call('/auth/me',null,token)).json()).expires_at,sessions.get(hashToken(token)).expires_at.toISOString());
     assert.equal((await call('/data/windy_batches',{name:'blocked',planned_date:null},token)).status,403);
+    const note = { id: itemId, title: 'After build', notes: 'Details', build: 'v154', status: 'OPEN', revisions: [], jira_key: null };
+    const putNote = body => call(`/hotfixes/${note.id}`,body,token,'PUT');
+    assert.equal((await putNote(note)).status,400);
+    assert.equal((await putNote({...note,batch_id:batchId,phase_id:itemId})).status,409);
+    assert.equal((await putNote({...note,batch_id:batchId,phase_id:phaseId,build:'v155'})).status,409);
+    const scoped = {...note,batch_id:batchId,phase_id:phaseId};
+    assert.equal((await putNote(scoped)).status,200);
+    assert.equal(hotfix.jira_key,null);
+    assert.equal((await putNote({...scoped,jira_key:'TEST-2',updated_at:hotfix.updated_at})).status,200);
+    assert.equal(hotfix.jira_key,'TEST-2');
     const schedule = `/phases/${phaseId}/schedule`;
     assert.equal((await call(schedule,{planned_date:'2026-11-19'},token,'PUT')).status,403);
     const admin = await (await call('/auth/login',{username:'admin',password:'admin-test-password'})).json();
+    const fixedNote = {...scoped, updated_at:hotfix.updated_at, status:'FIXED', revisions:[150361]};
+    assert.equal((await putNote(fixedNote)).status,403);
+    assert.equal((await call(`/hotfixes/${note.id}`,fixedNote,admin.token,'PUT')).status,200);
+    assert.deepEqual(hotfix.revisions,[150361]);
+    assert.equal(hotfix.jira_key,null);
     assert.equal((await call(schedule,{planned_date:'2026-02-30'},admin.token,'PUT')).status,400);
     assert.equal((await call(schedule,{planned_date:'2026-11-19',position:3},admin.token,'PUT')).status,400);
     assert.equal((await call(schedule,{planned_date:'2026-11-19'},admin.token,'PUT')).status,200);
-    assert.deepEqual(phase,{id:phaseId,position:0,planned_date:'2026-11-19'});
+    assert.deepEqual(phase,{id:phaseId,batch_id:batchId,position:0,planned_date:'2026-11-19'});
     assert.equal((await call(schedule,{planned_date:null},admin.token,'PUT')).status,200);
     assert.equal(phase.planned_date,null);
     const rows = [{jira_key:'TEST-1',summary:'Test title',jira_status:'Open'}];
