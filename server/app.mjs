@@ -4,7 +4,7 @@ import cors from 'cors';
 import { rateLimit } from 'express-rate-limit';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { allowHotfix, assignmentSchema, canDevelop, checkPassword, devWorkSchema, hashPassword, hashToken, loginSchema, phaseScheduleSchema, schemas, resources, publicMember, testHandleRoles, testWorkSchema, windyRoles } from './security.mjs';
+import { allowHotfix, assignmentSchema, canDevelop, checkPassword, devWorkSchema, hashPassword, hashToken, jiraIsComplete, loginSchema, phaseScheduleSchema, schemas, resources, publicMember, testHandleRoles, testWorkSchema, windyRoles } from './security.mjs';
 
 export async function createApp(db, { origins = [], production = true } = {}) {
   const app = express();
@@ -48,9 +48,9 @@ export async function createApp(db, { origins = [], production = true } = {}) {
     const session = await db.collection('sessions').findOne({ _id: hashToken(token), expires_at: { $gt: new Date() } });
     const user = session && await db.collection('users').findOne({ _id: session.user_id, active: true });
     if (!user || !windyRoles.includes(user.role) || (user.credential_version ?? null) !== (session.credential_version ?? null)) return fail(res,401,'Session expired or account disabled');
-    req.user = user; req.sessionId = session._id; next();
+    req.user = user; req.sessionId = session._id; req.sessionExpiresAt = session.expires_at; next();
   });
-  app.get('/auth/me', (req,res) => res.json(publicMember(req.user)));
+  app.get('/auth/me', (req,res) => res.json({ ...publicMember(req.user), expires_at: req.sessionExpiresAt.toISOString() }));
   app.post('/auth/logout', async (req,res) => { await db.collection('sessions').deleteOne({ _id: req.sessionId }); res.json({ ok: true }); });
   app.post('/auth/password', async (req,res) => {
     const result = z.object({ current: z.string().min(1).max(256), password: z.string().min(12).max(256) }).strict().safeParse(req.body);
@@ -103,7 +103,14 @@ export async function createApp(db, { origins = [], production = true } = {}) {
     } else {
       if (lane === 'dev' ? !canDevelop(req.user) : !testHandleRoles.includes(req.user.role)) return fail(res,403,'This role cannot update the result');
       const input = (lane === 'dev' ? devWorkSchema : testWorkSchema).parse(req.body);
-      const result = await items.updateOne({ ...filter, [`${field}.user_id`]: req.user._id, [`${field}.version`]: input.version }, { $set: {
+      const own = { ...filter, [`${field}.user_id`]: req.user._id, [`${field}.version`]: input.version };
+      if (lane === 'dev') {
+        const item = await items.findOne(own);
+        if (!item) return fail(res,409,'Assignment or result changed; refresh first');
+        const snapshot = await db.collection('windy_jira_snapshots').findOne({ _id: item.jira_key });
+        if (jiraIsComplete(snapshot)) return fail(res,409,'Jira is already completed; Dev status is locked');
+      }
+      const result = await items.updateOne(own, { $set: {
         [`${field}.status`]: input.status, [`${field}.note`]: input.note, [`${field}.version`]: randomUUID(), [`${field}.updated_at`]: new Date().toISOString(),
       } });
       if (!result.matchedCount) return fail(res,409,'Assignment or result changed; refresh first');
@@ -142,13 +149,13 @@ export async function createApp(db, { origins = [], production = true } = {}) {
   });
   app.put('/calendar/jira-snapshots', async (req,res) => {
     if (!canDevelop(req.user)) return fail(res,403,'Developer required');
-    const rows = z.array(z.object({ jira_key: z.string().max(180).regex(/^[A-Z][A-Z0-9_]*-[0-9]+$/), summary: z.string().trim().min(1).max(500), jira_status: z.string().trim().min(1).max(200) }).strict()).min(1).max(20).parse(req.body);
+    const rows = z.array(z.object({ jira_key: z.string().max(180).regex(/^[A-Z][A-Z0-9_]*-[0-9]+$/), summary: z.string().trim().min(1).max(500), jira_status: z.string().trim().min(1).max(200), jira_completed: z.boolean().optional() }).strict()).min(1).max(20).parse(req.body);
     const keys = [...new Set(rows.map(r => r.jira_key))];
     if (keys.length !== rows.length) return fail(res,400,'Duplicate Jira keys');
     const active = await db.collection('windy_items').distinct('jira_key', { jira_key: { $in: keys }, removed_at: { $exists: false }, ...(req.user.role === 'dev' ? { 'dev_handle.user_id': req.user._id } : {}) });
     if (active.length !== keys.length) return fail(res,409,'A Jira ticket is no longer in Build Calendar or assigned to this account');
     const updated_at = new Date().toISOString();
-    await db.collection('windy_jira_snapshots').bulkWrite(rows.map(row => ({updateOne:{filter:{_id:row.jira_key}, update:{$set:{...row,id:row.jira_key,updated_at}},upsert:true}})));
+    await db.collection('windy_jira_snapshots').bulkWrite(rows.map(row => ({updateOne:{filter:{_id:row.jira_key}, update:{$set:{...row,jira_completed:jiraIsComplete(row),id:row.jira_key,updated_at}},upsert:true}})));
     res.json({ ok: true });
   });
   app.get('/calendar/jira/:key/resolve-access', async (req,res) => {

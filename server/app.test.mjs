@@ -36,6 +36,7 @@ test('HTTP authentication/role boundary and logout (fake database, not Atlas)', 
          if (name === 'users') return users.find(u => matches(u,query));
          if (name === 'sessions') { const s = sessions.get(query._id); return s && s.expires_at > query.expires_at.$gt ? s : null; }
           if (name === 'windy_items' && matches(item,query)) return item;
+          if (name === 'windy_jira_snapshots' && snapshot?.jira_key === query._id) return snapshot;
        },
        find: query => ({sort: () => ({toArray: async () => users.filter(u => matches(u,query))})}),
       findOneAndUpdate: async () => ({count:1}),
@@ -76,6 +77,7 @@ test('HTTP authentication/role boundary and logout (fake database, not Atlas)', 
     const login = await call('/auth/login',{username:'tester',password:'test-password-only'}); assert.equal(login.status,200);
     const {token,member} = await login.json(); assert.equal(member.password_hash,undefined); assert.ok(sessions.has(hashToken(token)));
     assert.equal((await call('/auth/me',null,token)).status,200);
+    assert.equal((await (await call('/auth/me',null,token)).json()).expires_at,sessions.get(hashToken(token)).expires_at.toISOString());
     assert.equal((await call('/data/windy_batches',{name:'blocked',planned_date:null},token)).status,403);
     const schedule = `/phases/${phaseId}/schedule`;
     assert.equal((await call(schedule,{planned_date:'2026-11-19'},token,'PUT')).status,403);
@@ -120,7 +122,15 @@ test('HTTP authentication/role boundary and logout (fake database, not Atlas)', 
       assert.equal((await put(`${itemPath}/test/result`,{version:current,status:'PENDING'},assignee)).status,200);
       assert.equal(item.test_handle.note,'');
     }
-    assert.equal((await put(`${itemPath}/dev/result`,{version:item.dev_handle.version,status:'DONE',note:''},dev)).status,200);
+    assert.equal((await put(`${itemPath}/dev/result`,{version:item.dev_handle.version,status:'DONE',note:''},dev)).status,400);
+    const devResult = () => put(`${itemPath}/dev/result`,{version:item.dev_handle.version,status:'IN_PROGRESS',note:''},dev);
+    assert.equal((await devResult()).status,200);
+    for (const resolved of [{...rows[0],jira_status:'Resolved'},{...rows[0],jira_status:'Custom Closed',jira_completed:true}]) {
+      assert.equal((await put('/calendar/jira-snapshots',[resolved],admin.token)).status,200);
+      assert.equal((await devResult()).status,409);
+    }
+    assert.equal((await put('/calendar/jira-snapshots',[{...rows[0],jira_status:'Reopened',jira_completed:false}],admin.token)).status,200);
+    assert.equal((await devResult()).status,200);
     assert.equal((await put(`${itemPath}/dev/assign`,{user_id:null,version:item.dev_handle.version},pm)).status,200);
     assert.equal(item.dev_handle,undefined);
     item.submitted_by = 'other';

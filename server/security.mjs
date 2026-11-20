@@ -9,7 +9,8 @@ export const phaseScheduleSchema = z.object({ planned_date: z.iso.date().nullabl
 export const windyRoles = ['admin','dev','pm','tester','collaborator'];
 export const testHandleRoles = windyRoles.filter(role => role !== 'dev');
 export const assignmentSchema = z.object({ user_id: id.nullable(), version: id.nullable() }).strict();
-export const devWorkSchema = z.object({ version: id, status: z.enum(['PENDING','IN_PROGRESS','DONE']), note: z.string().trim().max(4000) }).strict();
+export const devWorkSchema = z.object({ version: id, status: z.enum(['PENDING','IN_PROGRESS']), note: z.string().trim().max(4000) }).strict();
+export const jiraIsComplete = row => row?.jira_completed ?? /^(resolved|closed|done|completed)$/i.test(row?.jira_status?.trim() ?? '');
 export const testWorkSchema = z.object({ version: id, status: z.enum(['PENDING','PASSED','FAIL']), note: z.string().trim().max(4000).default('') }).strict().refine(v => v.status !== 'FAIL' || v.note, { message: 'Fail requires a reason' });
 export const schemas = {
   windy_batches: z.object({ name: z.string().trim().min(1).max(100), planned_date: z.iso.date().nullable(), notes: z.string().max(10000).default('') }).strict(),
